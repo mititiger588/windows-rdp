@@ -1,4 +1,4 @@
-name: Windows RDP
+name: CI
 
 on: workflow_dispatch
 
@@ -11,95 +11,49 @@ jobs:
     - name: Download Ngrok
       run: |
         Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-        Expand-Archive ngrok.zip
-        
-    - name: Enable RDP Access
+        Expand-Archive ngrok.zip -DestinationPath C:\Windows\System32
+    
+    - name: Enable TS
       run: |
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
-        
+    
     - name: Create Tunnel
       run: |
-        # Create ngrok config
-        $configContent = @"
-version: "2"
-authtoken: 2sBm1f4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uybo2Zw9f
-tunnels:
-  rdp:
-    proto: tcp
-    addr: 3389
-"@
-        Set-Content -Path ngrok/ngrok.yml -Value $configContent
-        
-        # Start ngrok
-        Start-Process -FilePath "ngrok/ngrok.exe" -ArgumentList "start --all --config ngrok/ngrok.yml" -NoNewWindow
+        cd C:\Windows\System32
+        ./ngrok.exe authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
+        Start-Process C:\Windows\System32\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
+    
+    - name: Connect to RDP
+      run: |
+        Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "Runner@123" -Force)
         Start-Sleep -Seconds 10
-        
-        # Create RDP user
-        $Password = ConvertTo-SecureString "P@ssw0rd!123" -AsPlainText -Force
-        New-LocalUser -Name "rdpuser" -Password $Password -FullName "RDP User" -Description "RDP User Account"
-        Add-LocalGroupMember -Group "Administrators" -Member "rdpuser"
-        
-        # Get tunnel info
-        $maxAttempts = 10
-        $attempt = 0
-        $success = $false
-        
-        do {
-            $attempt++
-            Write-Host "Checking tunnel (Attempt $attempt of $maxAttempts)..."
-            
-            try {
-                $tunnels = Invoke-RestMethod -Uri http://localhost:4040/api/tunnels -UseBasicParsing
-                $tunnel = $tunnels.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
-                
-                if ($tunnel) {
-                    $address = $tunnel.public_url -replace "tcp://", ""
-                    Write-Host "RDP Connection Info"
-                    Write-Host "------------------------"
-                    Write-Host "Host: $address"
-                    Write-Host "Username: rdpuser"
-                    Write-Host "Password: P@ssw0rd!123"
-                    Write-Host "------------------------"
-                    $success = $true
-                    break
-                }
-            }
-            catch {
-                Write-Host "Failed to get tunnel info: $_"
-                Start-Sleep -Seconds 5
-            }
-        } while ($attempt -lt $maxAttempts -and -not $success)
-        
-        if (-not $success) {
-            Write-Host "Failed to establish tunnel"
-            exit 1
+        $connect = (Get-NetTCPConnection -LocalPort 4040).RemotePort
+        If ($connect) {
+            $tunnel = (Invoke-WebRequest -Uri http://localhost:4040/api/tunnels).Content | ConvertFrom-Json 
+            $rdp = $tunnel.tunnels[0].public_url -replace "tcp://", "" 
+            Write-Host "RDP Connection Details:"
+            Write-Host "------------------------"
+            Write-Host "Computer/Host: $rdp"
+            Write-Host "Username: runneradmin"
+            Write-Host "Password: Runner@123"
+            Write-Host "------------------------"
         }
-        
+    
     - name: Keep Alive
       run: |
-        $minutes = 0
+        $i = 0
         do {
-            if ($minutes % 30 -eq 0) {
-                try {
-                    $tunnels = Invoke-RestMethod -Uri http://localhost:4040/api/tunnels -UseBasicParsing
-                    $tunnel = $tunnels.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
-                    if ($tunnel) {
-                        $address = $tunnel.public_url -replace "tcp://", ""
-                        Write-Host "RDP Connection Info"
-                        Write-Host "------------------------"
-                        Write-Host "Host: $address"
-                        Write-Host "Username: rdpuser"
-                        Write-Host "Password: P@ssw0rd!123"
-                        Write-Host "------------------------"
-                    }
-                }
-                catch {
-                    Write-Host "Warning: Could not get tunnel info"
-                }
-            }
-            Start-Sleep -Seconds 60
-            $minutes++
-            Write-Host "Session active for $minutes minute(s)"
+          if ($i -eq 0) {
+            $tunnel = (Invoke-WebRequest -Uri http://localhost:4040/api/tunnels).Content | ConvertFrom-Json 
+            $rdp = $tunnel.tunnels[0].public_url -replace "tcp://", "" 
+            Write-Host "`nRDP is ready! Connect using:"
+            Write-Host "Computer/Host: $rdp"
+            Write-Host "Username: runneradmin"
+            Write-Host "Password: Runner@123"
+          }
+          Start-Sleep -Seconds 60
+          $i++
+          Write-Host "Session has been active for $i minute(s)"
         } while ($true)
