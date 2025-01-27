@@ -18,87 +18,79 @@ jobs:
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
-        
-        # Ensure RDP port is open
-        New-NetFirewallRule -DisplayName 'RDP-Port' -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
-        
-        # Restart Terminal Services for changes to take effect
-        Restart-Service -Name TermService -Force
     
     - name: Create Tunnel
       run: |
         cd C:\Windows\System32
         ./ngrok.exe authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
-        Start-Process ngrok.exe -ArgumentList "tcp --region us 3389"
-        Start-Sleep -Seconds 10
+        Start-Process ngrok.exe -ArgumentList "tcp 3389"
     
     - name: Connect to RDP
       run: |
+        # Configure user
         Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "Runner@123" -Force)
-        Start-Sleep -Seconds 1
+        Write-Host " Waiting for connection..."
+        Start-Sleep -Seconds 10
         
-        function Get-NgrokUrl {
-            try {
-                $api = Invoke-RestMethod -Uri http://127.0.0.1:4444/api/tunnels
-                $url = $api.tunnels[0].public_url
-                return $url -replace "tcp://", ""
-            } catch {
-                return $null
-            }
-        }
+        # Get public URL
+        $api = "http://localhost:4040/api/tunnels"
+        $tries = 0
+        $maxTries = 10
+        $success = $false
         
-        Write-Host "Waiting for Ngrok tunnel..."
-        $maxRetries = 10
-        $retryCount = 0
-        $url = $null
-        
+        Write-Host " Getting connection details..."
         do {
-            $retryCount++
-            $url = Get-NgrokUrl
-            
-            if ($url) {
-                Write-Host "RDP Connection Details:"
-                Write-Host "------------------------"
-                Write-Host "Host: $url"
-                Write-Host "Username: runneradmin"
-                Write-Host "Password: Runner@123"
-                Write-Host "------------------------"
+            $tries++
+            try {
+                $response = Invoke-WebRequest -Uri $api -UseBasicParsing
+                $data = ConvertFrom-Json $response.Content
+                $url = $data.tunnels[0].public_url -replace "tcp://", ""
+                Write-Host " Tunnel created successfully!"
+                Write-Host " RDP Connection Details:"
+                Write-Host "--------------------------------"
+                Write-Host " Host: $url"
+                Write-Host " Username: runneradmin"
+                Write-Host " Password: Runner@123"
+                Write-Host "--------------------------------"
+                Write-Host " Don't close this window, connection will terminate if the process ends"
+                $success = $true
                 break
-            } else {
-                if ($retryCount -lt $maxRetries) {
-                    Write-Host "Attempt $retryCount of $maxRetries. Waiting for Ngrok..."
+            }
+            catch {
+                if ($tries -lt $maxTries) {
+                    Write-Host " Waiting for tunnel... (Attempt $tries of $maxTries)"
                     Start-Sleep -Seconds 5
                 }
             }
-        } while ($retryCount -lt $maxRetries)
+        } while ($tries -lt $maxTries)
         
-        if (-not $url) {
-            Write-Host "Failed to get Ngrok URL after $maxRetries attempts"
+        if (-not $success) {
+            Write-Host " Failed to establish connection after $maxTries attempts"
             exit 1
         }
     
     - name: Keep Alive
       run: |
-        function Show-ConnectionInfo {
-            $url = Get-NgrokUrl
-            if ($url) {
-                Write-Host "`nRDP is ready! Connect using:"
-                Write-Host "Host: $url"
-                Write-Host "Username: runneradmin"
-                Write-Host "Password: Runner@123"
-                return $true
-            }
-            return $false
-        }
-        
         $i = 0
         do {
             if ($i % 10 -eq 0) {
-                if (-not (Show-ConnectionInfo)) {
-                    Write-Host "Warning: Could not get connection details"
+                try {
+                    $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing
+                    $data = ConvertFrom-Json $response.Content
+                    $url = $data.tunnels[0].public_url -replace "tcp://", ""
+                    Write-Host " RDP still active!"
+                    Write-Host " Connection Details:"
+                    Write-Host "--------------------------------"
+                    Write-Host " Host: $url"
+                    Write-Host " Username: runneradmin"
+                    Write-Host " Password: Runner@123"
+                    Write-Host "--------------------------------"
+                }
+                catch {
+                    Write-Host " Could not verify connection status"
                 }
             }
             Start-Sleep -Seconds 60
             $i++
-            Write-Host "Session has been active for $i minute(s)"
+            Write-Host " Session active for $i minute(s)"
         } while ($true)
