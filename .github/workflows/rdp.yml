@@ -113,19 +113,34 @@ jobs:
     
     - name: Keep Alive
       run: |
+        # Import the Get-NgrokUrl function from previous step
+        ${function:Get-NgrokUrl} = ${function:Get-NgrokUrl}
+        
         $minutes = 0
         do {
             if ($minutes % 10 -eq 0) {
-                $url = Get-NgrokUrl -attempt 0
-                if ($url) {
-                    Write-Host "`nRDP is still active!"
-                    Write-Host "------------------------"
-                    Write-Host "Host: $url"
-                    Write-Host "Username: runneradmin"
-                    Write-Host "Password: Runner@123"
-                    Write-Host "------------------------"
-                } else {
-                    Write-Host "Warning: Could not verify connection status"
+                Write-Host "Checking connection status..."
+                try {
+                    $url = Get-NgrokUrl -attempt $minutes
+                    if ($url) {
+                        Write-Host "`nRDP is still active!"
+                        Write-Host "------------------------"
+                        Write-Host "Host: $url"
+                        Write-Host "Username: runneradmin"
+                        Write-Host "Password: Runner@123"
+                        Write-Host "------------------------"
+                    } else {
+                        Write-Host "Warning: Could not verify connection status"
+                        # Try to restart Ngrok if needed
+                        $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
+                        if (-not $ngrokProcess) {
+                            Write-Host "Restarting Ngrok..."
+                            Start-Process ngrok.exe -ArgumentList "tcp --region us 3389" -PassThru
+                            Start-Sleep -Seconds 10
+                        }
+                    }
+                } catch {
+                    Write-Host "Error checking connection: $_"
                 }
             }
             Start-Sleep -Seconds 60
