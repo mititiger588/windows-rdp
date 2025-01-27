@@ -24,7 +24,7 @@ jobs:
         # Create ngrok config
         $configContent = @"
 version: "2"
-authtoken: 2sB1c8gvIvdsP57TaRcdqa3YHeH_7cxGPJ54H5uzXPW1ZvxKL
+authtoken: 2sBm1f4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uybo2Zw9f
 tunnels:
   rdp:
     proto: tcp
