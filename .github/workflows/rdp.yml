@@ -13,28 +13,43 @@ jobs:
         Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
         Expand-Archive ngrok.zip -DestinationPath C:\Windows\System32
     
-    - name: Enable TS
+    - name: Enable TS and Configure Firewall
       run: |
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+        
+        # Add firewall rules for Ngrok
+        New-NetFirewallRule -DisplayName "Ngrok-In" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4040
+        New-NetFirewallRule -DisplayName "Ngrok-Out" -Direction Outbound -Action Allow -Protocol TCP -LocalPort 4040
+        New-NetFirewallRule -DisplayName "RDP-Ngrok-In" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
+        New-NetFirewallRule -DisplayName "RDP-Ngrok-Out" -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389
     
     - name: Create Tunnel
       run: |
         cd C:\Windows\System32
-        # Configure and start Ngrok
-        ./ngrok.exe authtoken "2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f"
-        Write-Host "Starting Ngrok tunnel..."
-        
         # Kill any existing Ngrok processes
         Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
         Start-Sleep -Seconds 2
         
-        # Start Ngrok with specific parameters
-        $ngrok = Start-Process ngrok.exe -ArgumentList "tcp --region us 3389" -PassThru
-        Write-Host "Ngrok started with PID: $($ngrok.Id)"
+        # Configure Ngrok
+        ./ngrok.exe authtoken "2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f"
+        
+        # Create Ngrok config file
+        @"
+        version: "2"
+        web_addr: 0.0.0.0:4040
+        tunnels:
+          rdp:
+            proto: tcp
+            addr: 3389
+            region: us
+"@ | Out-File ngrok.yml -Encoding ASCII
+        
+        Write-Host "Starting Ngrok tunnel..."
+        Start-Process ngrok.exe -ArgumentList "start --all --config ngrok.yml" -NoNewWindow
         Write-Host "Waiting for tunnel to be ready..."
-        Start-Sleep -Seconds 10
+        Start-Sleep -Seconds 15
     
     - name: Connect to RDP
       run: |
@@ -47,28 +62,25 @@ jobs:
             try {
                 Write-Host "Checking Ngrok API (Attempt $attempt)..."
                 
-                # Check if Ngrok is running
-                $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
-                if (-not $ngrokProcess) {
-                    Write-Host "Ngrok not running! Restarting..."
-                    Start-Process ngrok.exe -ArgumentList "tcp --region us 3389" -PassThru
-                    Start-Sleep -Seconds 10
-                }
-                
-                # Try both API endpoints
-                $endpoints = @("http://127.0.0.1:4040/api/tunnels", "http://localhost:4040/api/tunnels")
-                foreach ($endpoint in $endpoints) {
+                # Try multiple IP addresses
+                $ips = @("127.0.0.1", "localhost", "0.0.0.0")
+                foreach ($ip in $ips) {
+                    $url = "http://${ip}:4040/api/tunnels"
                     try {
-                        Write-Host "Trying endpoint: $endpoint"
-                        $response = Invoke-RestMethod -Uri $endpoint -TimeoutSec 5
+                        Write-Host "Trying endpoint: $url"
+                        $response = Invoke-RestMethod -Uri $url -TimeoutSec 5
                         Write-Host "API Response: $($response | ConvertTo-Json -Depth 1)"
                         
                         if ($response.tunnels.Length -gt 0) {
-                            return $response.tunnels[0].public_url -replace "tcp://", ""
+                            foreach ($tunnel in $response.tunnels) {
+                                if ($tunnel.name -eq "rdp") {
+                                    return $tunnel.public_url -replace "tcp://", ""
+                                }
+                            }
                         }
                     }
                     catch {
-                        Write-Host "Failed to connect to $endpoint : $_"
+                        Write-Host "Failed to connect to $url : $_"
                     }
                 }
                 return $null
@@ -108,6 +120,10 @@ jobs:
             Write-Host "Failed to establish connection after $maxAttempts attempts"
             Write-Host "Ngrok process status:"
             Get-Process ngrok -ErrorAction SilentlyContinue | Format-List Id, ProcessName, StartTime, CPU
+            Write-Host "Checking Ngrok logs..."
+            if (Test-Path "ngrok.log") {
+                Get-Content "ngrok.log"
+            }
             exit 1
         }
     
@@ -120,29 +136,25 @@ jobs:
             try {
                 Write-Host "Checking Ngrok API (Attempt $attempt)..."
                 
-                # Check if Ngrok is running
-                $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
-                if (-not $ngrokProcess) {
-                    Write-Host "Ngrok not running! Restarting..."
-                    cd C:\Windows\System32
-                    Start-Process ngrok.exe -ArgumentList "tcp --region us 3389" -PassThru
-                    Start-Sleep -Seconds 10
-                }
-                
-                # Try both API endpoints
-                $endpoints = @("http://127.0.0.1:4040/api/tunnels", "http://localhost:4040/api/tunnels")
-                foreach ($endpoint in $endpoints) {
+                # Try multiple IP addresses
+                $ips = @("127.0.0.1", "localhost", "0.0.0.0")
+                foreach ($ip in $ips) {
+                    $url = "http://${ip}:4040/api/tunnels"
                     try {
-                        Write-Host "Trying endpoint: $endpoint"
-                        $response = Invoke-RestMethod -Uri $endpoint -TimeoutSec 5
+                        Write-Host "Trying endpoint: $url"
+                        $response = Invoke-RestMethod -Uri $url -TimeoutSec 5
                         Write-Host "API Response: $($response | ConvertTo-Json -Depth 1)"
                         
                         if ($response.tunnels.Length -gt 0) {
-                            return $response.tunnels[0].public_url -replace "tcp://", ""
+                            foreach ($tunnel in $response.tunnels) {
+                                if ($tunnel.name -eq "rdp") {
+                                    return $tunnel.public_url -replace "tcp://", ""
+                                }
+                            }
                         }
                     }
                     catch {
-                        Write-Host "Failed to connect to $endpoint : $_"
+                        Write-Host "Failed to connect to $url : $_"
                     }
                 }
                 return $null
@@ -173,8 +185,8 @@ jobs:
                         if (-not $ngrokProcess) {
                             Write-Host "Restarting Ngrok..."
                             cd C:\Windows\System32
-                            Start-Process ngrok.exe -ArgumentList "tcp --region us 3389" -PassThru
-                            Start-Sleep -Seconds 10
+                            Start-Process ngrok.exe -ArgumentList "start --all --config ngrok.yml" -NoNewWindow
+                            Start-Sleep -Seconds 15
                         }
                     }
                 } catch {
