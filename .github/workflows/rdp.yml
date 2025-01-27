@@ -13,86 +13,100 @@ jobs:
         Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
         Expand-Archive ngrok.zip -DestinationPath C:\Windows\System32
     
-    - name: Enable TS
+    - name: Enable TS and Configure Firewall
       run: |
+        # Enable Terminal Services
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+        
+        # Enable RDP Firewall rule
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        
+        # Ensure RDP service is running
+        Restart-Service -Name TermService -Force
+        
+        # Add firewall rules for Ngrok
+        New-NetFirewallRule -DisplayName 'Ngrok-In' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4444,3389
+        New-NetFirewallRule -DisplayName 'Ngrok-Out' -Direction Outbound -Action Allow -Protocol TCP -LocalPort 4444,3389
     
     - name: Create Tunnel
       run: |
         cd C:\Windows\System32
-        # Set auth token directly
-        ./ngrok.exe authtoken "2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f"
         
-        # Create simple config
+        # Kill any existing Ngrok processes
+        Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
+        
+        # Create Ngrok config
         @"
         version: "2"
         authtoken: 2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f
+        region: us
+        console_ui: false
         web_addr: 127.0.0.1:4444
+        log_level: debug
+        log_format: json
         tunnels:
           rdp:
             proto: tcp
             addr: 3389
+            bind_tls: true
         "@ | Out-File ngrok.yml -Encoding ASCII
         
-        # Start Ngrok with verbose logging
-        Start-Process ngrok.exe -ArgumentList "start --log=ngrok.log --log-level=debug --config ngrok.yml rdp" -WindowStyle Hidden
-        Write-Host "Started Ngrok, waiting for initialization..."
-        Start-Sleep -Seconds 15
+        # Start Ngrok with the new config
+        Write-Host "Starting Ngrok..."
+        Start-Process ngrok.exe -ArgumentList "start --all --config ngrok.yml" -NoNewWindow
         
-        # Check if log file exists and show its contents
-        if (Test-Path ngrok.log) {
-            Write-Host "Ngrok Log Contents:"
-            Get-Content ngrok.log
+        # Wait for Ngrok to initialize
+        Write-Host "Waiting for Ngrok to initialize..."
+        Start-Sleep -Seconds 10
+        
+        # Verify Ngrok is running
+        $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
+        if ($ngrokProcess) {
+            Write-Host "Ngrok is running with PID: $($ngrokProcess.Id)"
         } else {
-            Write-Host "No Ngrok log file found"
+            Write-Host "Failed to start Ngrok"
+            exit 1
         }
     
     - name: Connect to RDP
       run: |
-        # Set RDP password
+        # Configure RDP user
         Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "Runner@123" -Force)
         
-        # Function to check Ngrok status
-        function Get-NgrokStatus {
+        function Get-NgrokUrl {
             try {
-                # Check if Ngrok is running
-                $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
-                if (-not $ngrokProcess) {
-                    Write-Host "Ngrok is not running. Restarting..."
-                    Start-Process ngrok.exe -ArgumentList "start --log=ngrok.log --log-level=debug --config ngrok.yml rdp" -WindowStyle Hidden
-                    Start-Sleep -Seconds 15
-                    
-                    # Show log after restart
-                    if (Test-Path ngrok.log) {
-                        Write-Host "Ngrok Log after restart:"
-                        Get-Content ngrok.log
+                $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4444/api/tunnels"
+                foreach ($tunnel in $tunnels.tunnels) {
+                    if ($tunnel.proto -eq 'tcp') {
+                        return $tunnel.public_url -replace "tcp://", ""
                     }
                 }
-                
-                # Get tunnel info
-                $response = Invoke-WebRequest -Uri http://127.0.0.1:4444/api/tunnels -UseBasicParsing
-                Write-Host "API Response: $($response.Content)"
-                $tunnels = $response | ConvertFrom-Json
-                return $tunnels.tunnels[0].public_url -replace "tcp://", ""
             }
             catch {
-                Write-Host "Error in Get-NgrokStatus: $_"
+                Write-Host "Error getting tunnel URL: $_"
                 return $null
             }
         }
         
-        # Try to get connection details
+        # Get connection details
         $maxAttempts = 5
         $attempt = 0
         $connected = $false
         
         do {
             $attempt++
-            Write-Host "`nChecking connection (Attempt $attempt of $maxAttempts)..."
-            $url = Get-NgrokStatus
+            Write-Host "`nAttempt $attempt of $maxAttempts to get connection details..."
             
+            # Verify Ngrok is running
+            $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
+            if (-not $ngrokProcess) {
+                Write-Host "Ngrok not running, restarting..."
+                Start-Process ngrok.exe -ArgumentList "start --all --config ngrok.yml" -NoNewWindow
+                Start-Sleep -Seconds 10
+            }
+            
+            $url = Get-NgrokUrl
             if ($url) {
                 Write-Host "`nRDP Connection Details:"
                 Write-Host "------------------------"
@@ -103,21 +117,14 @@ jobs:
                 $connected = $true
                 break
             }
-            else {
-                Write-Host "Waiting for connection... (Attempt $attempt of $maxAttempts)"
-                # Show process status
-                Write-Host "`nNgrok Process Status:"
-                Get-Process ngrok -ErrorAction SilentlyContinue | Format-List Id, ProcessName, StartTime, CPU
-                Start-Sleep -Seconds 10
-            }
+            
+            Write-Host "Waiting before next attempt..."
+            Start-Sleep -Seconds 5
+            
         } while ($attempt -lt $maxAttempts -and -not $connected)
         
         if (-not $connected) {
             Write-Host "Failed to establish connection after $maxAttempts attempts"
-            Write-Host "Final Ngrok Log Contents:"
-            if (Test-Path ngrok.log) {
-                Get-Content ngrok.log
-            }
             exit 1
         }
     
@@ -126,21 +133,16 @@ jobs:
         $minutes = 0
         do {
             if ($minutes % 10 -eq 0) {
-                try {
-                    $tunnels = Invoke-WebRequest -Uri http://127.0.0.1:4444/api/tunnels -UseBasicParsing | ConvertFrom-Json
-                    $url = $tunnels.tunnels[0].public_url -replace "tcp://", ""
+                $url = Get-NgrokUrl
+                if ($url) {
                     Write-Host "`nRDP is still active!"
                     Write-Host "------------------------"
                     Write-Host "Host: $url"
                     Write-Host "Username: runneradmin"
                     Write-Host "Password: Runner@123"
                     Write-Host "------------------------"
-                }
-                catch {
+                } else {
                     Write-Host "Warning: Could not verify connection status"
-                    Write-Host "Error details: $_"
-                    # Check Ngrok process
-                    Get-Process ngrok -ErrorAction SilentlyContinue | Format-List Id, ProcessName, StartTime, CPU
                 }
             }
             Start-Sleep -Seconds 60
