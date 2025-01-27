@@ -22,23 +22,63 @@ jobs:
     - name: Create Tunnel
       run: |
         cd C:\Windows\System32
+        Write-Host "Setting up Ngrok..."
         ./ngrok.exe authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
-        Start-Process C:\Windows\System32\ngrok.exe -ArgumentList "tcp 3389" -WindowStyle Hidden
+        
+        Write-Host "Starting Ngrok tunnel..."
+        Start-Process C:\Windows\System32\ngrok.exe -ArgumentList "tcp 3389 --log=stdout" -WindowStyle Hidden
+        
+        # Wait for Ngrok to start
+        Write-Host "Waiting for Ngrok to start..."
+        Start-Sleep -Seconds 15
     
     - name: Connect to RDP
       run: |
+        # Set up RDP user
         Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "Runner@123" -Force)
-        Start-Sleep -Seconds 10
-        $connect = (Get-NetTCPConnection -LocalPort 4040).RemotePort
-        If ($connect) {
-            $tunnel = (Invoke-WebRequest -Uri http://localhost:4040/api/tunnels).Content | ConvertFrom-Json 
-            $rdp = $tunnel.tunnels[0].public_url -replace "tcp://", "" 
-            Write-Host "RDP Connection Details:"
-            Write-Host "------------------------"
-            Write-Host "Computer/Host: $rdp"
-            Write-Host "Username: runneradmin"
-            Write-Host "Password: Runner@123"
-            Write-Host "------------------------"
+        Write-Host "RDP user credentials set."
+        
+        # Wait for Ngrok to be ready
+        $maxAttempts = 5
+        $attempt = 0
+        $success = $false
+        
+        do {
+            $attempt++
+            Write-Host "Checking Ngrok connection (Attempt $attempt of $maxAttempts)..."
+            
+            try {
+                # Check if Ngrok is running
+                $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
+                if (-not $ngrokProcess) {
+                    Write-Host "Ngrok process not found. Restarting..."
+                    Start-Process C:\Windows\System32\ngrok.exe -ArgumentList "tcp 3389 --log=stdout" -WindowStyle Hidden
+                    Start-Sleep -Seconds 15
+                }
+                
+                # Get tunnel info
+                $tunnel = Invoke-RestMethod -Uri http://localhost:4040/api/tunnels -TimeoutSec 10
+                if ($tunnel.tunnels.Length -gt 0) {
+                    $rdp = $tunnel.tunnels[0].public_url -replace "tcp://", ""
+                    Write-Host "RDP Connection Details:"
+                    Write-Host "------------------------"
+                    Write-Host "Computer/Host: $rdp"
+                    Write-Host "Username: runneradmin"
+                    Write-Host "Password: Runner@123"
+                    Write-Host "------------------------"
+                    $success = $true
+                    break
+                }
+            }
+            catch {
+                Write-Host "Attempt $attempt failed: $_"
+                Start-Sleep -Seconds 10
+            }
+        } while ($attempt -lt $maxAttempts -and -not $success)
+        
+        if (-not $success) {
+            Write-Host "Failed to establish tunnel after $maxAttempts attempts"
+            throw "Failed to establish Ngrok tunnel"
         }
     
     - name: Keep Alive
@@ -46,12 +86,17 @@ jobs:
         $i = 0
         do {
           if ($i -eq 0) {
-            $tunnel = (Invoke-WebRequest -Uri http://localhost:4040/api/tunnels).Content | ConvertFrom-Json 
-            $rdp = $tunnel.tunnels[0].public_url -replace "tcp://", "" 
-            Write-Host "`nRDP is ready! Connect using:"
-            Write-Host "Computer/Host: $rdp"
-            Write-Host "Username: runneradmin"
-            Write-Host "Password: Runner@123"
+            try {
+                $tunnel = Invoke-RestMethod -Uri http://localhost:4040/api/tunnels
+                $rdp = $tunnel.tunnels[0].public_url -replace "tcp://", ""
+                Write-Host "`nRDP is ready! Connect using:"
+                Write-Host "Computer/Host: $rdp"
+                Write-Host "Username: runneradmin"
+                Write-Host "Password: Runner@123"
+            }
+            catch {
+                Write-Host "Warning: Could not get tunnel info: $_"
+            }
           }
           Start-Sleep -Seconds 60
           $i++
