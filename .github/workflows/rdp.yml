@@ -22,8 +22,13 @@ jobs:
     - name: Create Tunnel
       run: |
         cd C:\Windows\System32
-        # Create Ngrok config file
+        # Set auth token directly
+        ./ngrok.exe authtoken "2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f"
+        
+        # Create simple config
         @"
+        version: "2"
+        authtoken: 2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f
         web_addr: 127.0.0.1:4444
         tunnels:
           rdp:
@@ -31,9 +36,18 @@ jobs:
             addr: 3389
         "@ | Out-File ngrok.yml -Encoding ASCII
         
-        ./ngrok.exe authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
-        Start-Process ngrok.exe -ArgumentList "start --config ngrok.yml rdp" -WindowStyle Hidden
+        # Start Ngrok with verbose logging
+        Start-Process ngrok.exe -ArgumentList "start --log=ngrok.log --log-level=debug --config ngrok.yml rdp" -WindowStyle Hidden
+        Write-Host "Started Ngrok, waiting for initialization..."
         Start-Sleep -Seconds 15
+        
+        # Check if log file exists and show its contents
+        if (Test-Path ngrok.log) {
+            Write-Host "Ngrok Log Contents:"
+            Get-Content ngrok.log
+        } else {
+            Write-Host "No Ngrok log file found"
+        }
     
     - name: Connect to RDP
       run: |
@@ -47,15 +61,24 @@ jobs:
                 $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
                 if (-not $ngrokProcess) {
                     Write-Host "Ngrok is not running. Restarting..."
-                    Start-Process ngrok.exe -ArgumentList "start --config ngrok.yml rdp" -WindowStyle Hidden
+                    Start-Process ngrok.exe -ArgumentList "start --log=ngrok.log --log-level=debug --config ngrok.yml rdp" -WindowStyle Hidden
                     Start-Sleep -Seconds 15
+                    
+                    # Show log after restart
+                    if (Test-Path ngrok.log) {
+                        Write-Host "Ngrok Log after restart:"
+                        Get-Content ngrok.log
+                    }
                 }
                 
                 # Get tunnel info
-                $tunnels = Invoke-WebRequest -Uri http://127.0.0.1:4444/api/tunnels -UseBasicParsing | ConvertFrom-Json
+                $response = Invoke-WebRequest -Uri http://127.0.0.1:4444/api/tunnels -UseBasicParsing
+                Write-Host "API Response: $($response.Content)"
+                $tunnels = $response | ConvertFrom-Json
                 return $tunnels.tunnels[0].public_url -replace "tcp://", ""
             }
             catch {
+                Write-Host "Error in Get-NgrokStatus: $_"
                 return $null
             }
         }
@@ -67,11 +90,11 @@ jobs:
         
         do {
             $attempt++
-            Write-Host "Checking connection (Attempt $attempt of $maxAttempts)..."
+            Write-Host "`nChecking connection (Attempt $attempt of $maxAttempts)..."
             $url = Get-NgrokStatus
             
             if ($url) {
-                Write-Host "RDP Connection Details:"
+                Write-Host "`nRDP Connection Details:"
                 Write-Host "------------------------"
                 Write-Host "Host: $url"
                 Write-Host "Username: runneradmin"
@@ -82,12 +105,19 @@ jobs:
             }
             else {
                 Write-Host "Waiting for connection... (Attempt $attempt of $maxAttempts)"
+                # Show process status
+                Write-Host "`nNgrok Process Status:"
+                Get-Process ngrok -ErrorAction SilentlyContinue | Format-List Id, ProcessName, StartTime, CPU
                 Start-Sleep -Seconds 10
             }
         } while ($attempt -lt $maxAttempts -and -not $connected)
         
         if (-not $connected) {
             Write-Host "Failed to establish connection after $maxAttempts attempts"
+            Write-Host "Final Ngrok Log Contents:"
+            if (Test-Path ngrok.log) {
+                Get-Content ngrok.log
+            }
             exit 1
         }
     
@@ -108,6 +138,9 @@ jobs:
                 }
                 catch {
                     Write-Host "Warning: Could not verify connection status"
+                    Write-Host "Error details: $_"
+                    # Check Ngrok process
+                    Get-Process ngrok -ErrorAction SilentlyContinue | Format-List Id, ProcessName, StartTime, CPU
                 }
             }
             Start-Sleep -Seconds 60
