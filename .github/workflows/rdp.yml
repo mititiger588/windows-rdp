@@ -29,73 +29,73 @@ jobs:
       run: |
         cd C:\Windows\System32
         ./ngrok.exe authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
-        Start-Process ngrok.exe -ArgumentList "tcp 3389"
-        Start-Sleep -Seconds 5
+        Start-Process ngrok.exe -ArgumentList "tcp --region us 3389"
+        Start-Sleep -Seconds 10
     
     - name: Connect to RDP
       run: |
-        # Set up RDP user
         Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "Runner@123" -Force)
-        Write-Host "RDP user credentials set."
+        Start-Sleep -Seconds 1
         
-        # Wait for Ngrok to be ready
-        $maxAttempts = 10
-        $attempt = 0
-        $success = $false
+        function Get-NgrokUrl {
+            try {
+                $api = Invoke-RestMethod -Uri http://127.0.0.1:4444/api/tunnels
+                $url = $api.tunnels[0].public_url
+                return $url -replace "tcp://", ""
+            } catch {
+                return $null
+            }
+        }
+        
+        Write-Host "Waiting for Ngrok tunnel..."
+        $maxRetries = 10
+        $retryCount = 0
+        $url = $null
         
         do {
-            $attempt++
-            Write-Host "Checking Ngrok connection (Attempt $attempt of $maxAttempts)..."
+            $retryCount++
+            $url = Get-NgrokUrl
             
-            try {
-                # Try to get tunnel info directly without checking TCP connection
-                $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing
-                $tunnel = $tunnelInfo.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
-                
-                if ($tunnel) {
-                    $address = $tunnel.public_url -replace "tcp://", ""
-                    Write-Host "RDP Connection Details:"
-                    Write-Host "------------------------"
-                    Write-Host "Host: $address"
-                    Write-Host "Username: runneradmin"
-                    Write-Host "Password: Runner@123"
-                    Write-Host "------------------------"
-                    $success = $true
-                    break
-                }
-            }
-            catch {
-                Write-Host "Attempt $attempt failed: $_"
-                if ($attempt -lt $maxAttempts) {
-                    Write-Host "Retrying in 5 seconds..."
+            if ($url) {
+                Write-Host "RDP Connection Details:"
+                Write-Host "------------------------"
+                Write-Host "Host: $url"
+                Write-Host "Username: runneradmin"
+                Write-Host "Password: Runner@123"
+                Write-Host "------------------------"
+                break
+            } else {
+                if ($retryCount -lt $maxRetries) {
+                    Write-Host "Attempt $retryCount of $maxRetries. Waiting for Ngrok..."
                     Start-Sleep -Seconds 5
                 }
             }
-        } while ($attempt -lt $maxAttempts -and -not $success)
+        } while ($retryCount -lt $maxRetries)
         
-        if (-not $success) {
-            Write-Host "Failed to establish tunnel after $maxAttempts attempts"
+        if (-not $url) {
+            Write-Host "Failed to get Ngrok URL after $maxRetries attempts"
             exit 1
         }
     
     - name: Keep Alive
       run: |
+        function Show-ConnectionInfo {
+            $url = Get-NgrokUrl
+            if ($url) {
+                Write-Host "`nRDP is ready! Connect using:"
+                Write-Host "Host: $url"
+                Write-Host "Username: runneradmin"
+                Write-Host "Password: Runner@123"
+                return $true
+            }
+            return $false
+        }
+        
         $i = 0
         do {
             if ($i % 10 -eq 0) {
-                try {
-                    $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing
-                    $tunnel = $tunnelInfo.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
-                    if ($tunnel) {
-                        $address = $tunnel.public_url -replace "tcp://", ""
-                        Write-Host "`nRDP is ready! Connect using:"
-                        Write-Host "Host: $address"
-                        Write-Host "Username: runneradmin"
-                        Write-Host "Password: Runner@123"
-                    }
-                }
-                catch {
-                    Write-Host "Warning: Could not get tunnel info"
+                if (-not (Show-ConnectionInfo)) {
+                    Write-Host "Warning: Could not get connection details"
                 }
             }
             Start-Sleep -Seconds 60
