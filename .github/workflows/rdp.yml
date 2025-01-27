@@ -33,7 +33,7 @@ jobs:
         Start-Sleep -Seconds 2
         
         # Configure Ngrok with web interface
-        ./ngrok.exe config add-authtoken "2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f"
+        ./ngrok.exe config add-authtoken "2s7wZBPYAnGFvFv0OLItSRlVX9b_5spsDPRjMTK9a8Kz59Vz7"
         
         Write-Host "Starting Ngrok tunnel..."
         Start-Process -FilePath "ngrok.exe" -ArgumentList "tcp --region us 3389" -NoNewWindow
