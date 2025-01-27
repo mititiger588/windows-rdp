@@ -36,25 +36,20 @@ jobs:
         # Kill any existing Ngrok processes
         Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
         
-        # Create Ngrok config
+        # Create simple Ngrok config
         @"
         version: "2"
         authtoken: 2sBmIF4uQLdVKz6kgB17LAgFLNh_2k5RJtbxpYH5uyboZZw9f
-        region: us
-        console_ui: false
         web_addr: 127.0.0.1:4444
-        log_level: debug
-        log_format: json
         tunnels:
           rdp:
             proto: tcp
             addr: 3389
-            bind_tls: true
-        "@ | Out-File ngrok.yml -Encoding ASCII
+"@ | Out-File ngrok.yml -Encoding ASCII
         
         # Start Ngrok with the new config
         Write-Host "Starting Ngrok..."
-        Start-Process ngrok.exe -ArgumentList "start --all --config ngrok.yml" -NoNewWindow
+        Start-Process ngrok.exe -ArgumentList "start --config ngrok.yml rdp" -NoNewWindow
         
         # Wait for Ngrok to initialize
         Write-Host "Waiting for Ngrok to initialize..."
@@ -76,12 +71,11 @@ jobs:
         
         function Get-NgrokUrl {
             try {
-                $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4444/api/tunnels"
-                foreach ($tunnel in $tunnels.tunnels) {
-                    if ($tunnel.proto -eq 'tcp') {
-                        return $tunnel.public_url -replace "tcp://", ""
-                    }
+                $response = Invoke-RestMethod -Uri "http://127.0.0.1:4444/api/tunnels"
+                if ($response.tunnels.Length -gt 0) {
+                    return $response.tunnels[0].public_url -replace "tcp://", ""
                 }
+                return $null
             }
             catch {
                 Write-Host "Error getting tunnel URL: $_"
@@ -102,7 +96,7 @@ jobs:
             $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
             if (-not $ngrokProcess) {
                 Write-Host "Ngrok not running, restarting..."
-                Start-Process ngrok.exe -ArgumentList "start --all --config ngrok.yml" -NoNewWindow
+                Start-Process ngrok.exe -ArgumentList "start --config ngrok.yml rdp" -NoNewWindow
                 Start-Sleep -Seconds 10
             }
             
