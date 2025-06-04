@@ -1,164 +1,66 @@
-name: CI
+name: Windows RDP Server
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 jobs:
-  build:
+  rdp:
     runs-on: windows-latest
-    timeout-minutes: 9999
-
     steps:
-    - name: Download Ngrok
-      run: |
-        Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-        Expand-Archive ngrok.zip -DestinationPath C:\Windows\System32
-    
-    - name: Enable TS and Configure Firewall
-      run: |
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
-        
-        # Add firewall rules for Ngrok
-        New-NetFirewallRule -DisplayName "Ngrok-In" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4040
-        New-NetFirewallRule -DisplayName "Ngrok-Out" -Direction Outbound -Action Allow -Protocol TCP -LocalPort 4040
-        New-NetFirewallRule -DisplayName "RDP-Ngrok-In" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
-        New-NetFirewallRule -DisplayName "RDP-Ngrok-Out" -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389
-    
-    - name: Create Tunnel
-      run: |
-        cd C:\Windows\System32
-        # Kill any existing Ngrok processes
-        Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
-        Start-Sleep -Seconds 2
-        
-        # Configure Ngrok with web interface
-        ./ngrok.exe config add-authtoken "2s7wZBPYAnGFvFv0OLItSRlVX9b_5spsDPRjMTK9a8Kz59Vz7"
-        
-        Write-Host "Starting Ngrok tunnel..."
-        Start-Process -FilePath "ngrok.exe" -ArgumentList "tcp --region us 3389" -NoNewWindow
-        Write-Host "Waiting for tunnel to be ready..."
-        Start-Sleep -Seconds 15
-    
-    - name: Connect to RDP
-      run: |
-        Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "Runner@123" -Force)
-        
-        function Get-NgrokUrl {
-            param (
-                [int]$attempt
-            )
+      - name: Set ngrok auth token
+        run: |
+          ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+
+      - name: Start ngrok TCP tunnel on port 3389
+        run: start /b ngrok tcp 3389
+      - name: Wait for ngrok to start
+        run: Start-Sleep -Seconds 10
+
+      - name: Set password for runneradmin user
+        shell: powershell
+        run: |
+          $Password = ConvertTo-SecureString "Runner@123" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $Password
+
+      - name: Get ngrok public URL
+        shell: powershell
+        run: |
+          function Get-NgrokUrl {
+            param ([int]$attempt)
             try {
-                Write-Host "Checking Ngrok API (Attempt $attempt)..."
-                
-                $url = "http://localhost:4040/api/tunnels"
-                Write-Host "Trying endpoint: $url"
-                
-                $response = Invoke-RestMethod -Uri $url -TimeoutSec 5
-                Write-Host "API Response: $($response | ConvertTo-Json -Depth 1)"
-                
-                if ($response.tunnels.Length -gt 0) {
-                    return $response.tunnels[0].public_url -replace "tcp://", ""
-                }
-                
-                return $null
+              $url = "http://localhost:4040/api/tunnels"
+              $response = Invoke-RestMethod -Uri $url -TimeoutSec 5
+              if ($response.tunnels.Length -gt 0) {
+                return $response.tunnels[0].public_url -replace "tcp://", ""
+              }
+              return $null
             }
             catch {
-                Write-Host "Error in Get-NgrokUrl: $_"
-                return $null
+              return $null
             }
-        }
-        
-        $maxAttempts = 10
-        $attempt = 0
-        $connected = $false
-        
-        do {
+          }
+
+          $maxAttempts = 10
+          $attempt = 0
+          $connected = $false
+
+          do {
             $attempt++
-            Write-Host "`nAttempt $attempt of $maxAttempts..."
-            
             $url = Get-NgrokUrl -attempt $attempt
             if ($url) {
-                Write-Host "`nRDP Connection Details:"
-                Write-Host "------------------------"
-                Write-Host "Host: $url"
-                Write-Host "Username: runneradmin"
-                Write-Host "Password: Runner@123"
-                Write-Host "------------------------"
-                $connected = $true
-                break
+              Write-Host "RDP Connection Details:"
+              Write-Host "------------------------"
+              Write-Host "Host: $url"
+              Write-Host "Username: runneradmin"
+              Write-Host "Password: Runner@123"
+              Write-Host "------------------------"
+              $connected = $true
+              break
             }
-            
-            Write-Host "Waiting before next attempt..."
             Start-Sleep -Seconds 5
-            
-        } while ($attempt -lt $maxAttempts -and -not $connected)
-        
-        if (-not $connected) {
-            Write-Host "Failed to establish connection after $maxAttempts attempts"
-            Write-Host "Ngrok process status:"
-            Get-Process ngrok -ErrorAction SilentlyContinue | Format-List Id, ProcessName, StartTime, CPU
-            Write-Host "Checking Ngrok logs..."
-            Get-Content "$env:USERPROFILE\AppData\Local\ngrok\ngrok.log" -ErrorAction SilentlyContinue
+          } while ($attempt -lt $maxAttempts -and -not $connected)
+
+          if (-not $connected) {
+            Write-Host "Failed to get Ngrok URL"
             exit 1
-        }
-    
-    - name: Keep Alive
-      run: |
-        function Get-NgrokUrl {
-            param (
-                [int]$attempt
-            )
-            try {
-                Write-Host "Checking Ngrok API (Attempt $attempt)..."
-                
-                $url = "http://localhost:4040/api/tunnels"
-                Write-Host "Trying endpoint: $url"
-                
-                $response = Invoke-RestMethod -Uri $url -TimeoutSec 5
-                Write-Host "API Response: $($response | ConvertTo-Json -Depth 1)"
-                
-                if ($response.tunnels.Length -gt 0) {
-                    return $response.tunnels[0].public_url -replace "tcp://", ""
-                }
-                
-                return $null
-            }
-            catch {
-                Write-Host "Error in Get-NgrokUrl: $_"
-                return $null
-            }
-        }
-        
-        $minutes = 0
-        do {
-            if ($minutes % 10 -eq 0) {
-                Write-Host "Checking connection status..."
-                try {
-                    $url = Get-NgrokUrl -attempt $minutes
-                    if ($url) {
-                        Write-Host "`nRDP is still active!"
-                        Write-Host "------------------------"
-                        Write-Host "Host: $url"
-                        Write-Host "Username: runneradmin"
-                        Write-Host "Password: Runner@123"
-                        Write-Host "------------------------"
-                    } else {
-                        Write-Host "Warning: Could not verify connection status"
-                        # Try to restart Ngrok if needed
-                        $ngrokProcess = Get-Process ngrok -ErrorAction SilentlyContinue
-                        if (-not $ngrokProcess) {
-                            Write-Host "Restarting Ngrok..."
-                            cd C:\Windows\System32
-                            Start-Process -FilePath "ngrok.exe" -ArgumentList "tcp --region us 3389" -NoNewWindow
-                            Start-Sleep -Seconds 15
-                        }
-                    }
-                } catch {
-                    Write-Host "Error checking connection: $_"
-                }
-            }
-            Start-Sleep -Seconds 60
-            $minutes++
-            Write-Host "Session has been active for $minutes minute(s)"
-        } while ($true)
+          }
